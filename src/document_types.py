@@ -19,9 +19,14 @@ DOCUMENT_CONFIG = {
         "name": "PAN Card",
         "keywords": [
             "income tax",
+            "income tax department",
             "permanent account number",
             "permanent account",
             "pan",
+            "govt of india",
+            "government of india",
+            "nsdl",
+            "utiitsl",
         ],
         "expected_digits": 10,
         "required_fields": ["name", "father's name", "dob"],
@@ -124,14 +129,26 @@ def detect_document_type(words: list) -> str:
         "income tax" in text
         or "permanent account" in text
     ):
-        scores["pan"] += 10
+        scores["pan"] += 12
+
+    if (
+        "govt of india" in text
+        or "government of india" in text
+    ):
+        scores["pan"] += 6
+
+    if (
+        "nsdl" in text
+        or "utiitsl" in text
+    ):
+        scores["pan"] += 6
 
     if re.search(
         r"\b[a-z]{5}\d{4}[a-z]\b",
         text,
         re.IGNORECASE
     ):
-        scores["pan"] += 8
+        scores["pan"] += 10
 
     # -----------------------------
     # Driving Licence signals

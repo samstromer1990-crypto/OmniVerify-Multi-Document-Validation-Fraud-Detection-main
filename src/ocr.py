@@ -153,6 +153,7 @@ def _score_result(
     # PAN
     if (
         "income tax" in lower
+        or "permanent account" in lower
         or re.search(
             r"\bpan\b",
             lower
@@ -160,8 +161,16 @@ def _score_result(
     ):
         score += 35
 
+    if (
+        "govt of india" in lower
+        or "government of india" in lower
+        or "nsdl" in lower
+        or "utiitsl" in lower
+    ):
+        score += 20
+
     if re.search(
-        r"\bpan\s*[:\-]?\s*[a-z]{5}\d{4}[a-z]\b",
+        r"\b(?:pan\s*[:\-]?\s*)?[a-z]{5}\d{4}[a-z]\b",
         lower,
         re.IGNORECASE
     ):

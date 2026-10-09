@@ -52,12 +52,71 @@ _DL_ID_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PAN_CANDIDATE_RE = re.compile(
+    r"(?:PAN\s*[:.\-_]*)?([A-Za-z0-9]{5}[\s.\-_/]*[A-Za-z0-9]{4}[\s.\-_/]*[A-Za-z0-9])(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+_PAN_CHAR_TO_LETTER = {"0": "O", "1": "I", "5": "S", "8": "B", "2": "Z"}
+_PAN_CHAR_TO_DIGIT = {"O": "0", "I": "1", "L": "1", "S": "5", "B": "8", "Z": "2"}
+
 _DL_STOPWORDS = {
     "union", "india", "indian", "of", "driving", "licence", "license",
     "date", "issue", "validity", "valid", "till", "upto", "blood",
     "group", "father", "name", "dob", "gender", "male", "female",
     "holder", "the", "and", "card",
+    "income", "tax", "department", "govt", "government", "permanent",
+    "account", "number", "pan", "nsdl", "utiitsl", "pancard", "signature",
+    "photo", "sub", "form",
 }
+
+
+def _clean_pan_candidate(raw: str):
+    """Normalize and validate a 10-char PAN token, repairing common OCR confusions."""
+    token = re.sub(r"[^A-Za-z0-9]", "", str(raw)).upper()
+    if len(token) != 10:
+        return None
+
+    chars = list(token)
+    # Positions 0..4 must be letters (A-Z)
+    for idx in range(5):
+        if chars[idx].isdigit():
+            chars[idx] = _PAN_CHAR_TO_LETTER.get(chars[idx], chars[idx])
+        if not chars[idx].isalpha():
+            return None
+
+    # Positions 5..8 must be digits (0-9)
+    for idx in range(5, 9):
+        if chars[idx].isalpha():
+            chars[idx] = _PAN_CHAR_TO_DIGIT.get(chars[idx], chars[idx])
+        if not chars[idx].isdigit():
+            return None
+
+    # Position 9 must be a letter (A-Z)
+    if chars[9].isdigit():
+        chars[9] = _PAN_CHAR_TO_LETTER.get(chars[9], chars[9])
+    if not chars[9].isalpha():
+        return None
+
+    return "".join(chars)
+
+
+def _extract_pan_id(text: str):
+    """Extract and validate 10-character PAN number from text."""
+    for match in _PAN_CANDIDATE_RE.finditer(text):
+        cleaned = _clean_pan_candidate(match.group(1))
+        if cleaned:
+            return {
+                "found": True,
+                "count": 1,
+                "best": {
+                    "digits": cleaned,
+                    "source_word": _clean(match.group(0)),
+                    "bbox": None,
+                    "confidence": None,
+                },
+            }
+    return None
 
 
 def _normalize_dl_text(text):
@@ -68,7 +127,7 @@ def _normalize_dl_text(text):
 
 
 def _normalize_field_text(text):
-    """Map common Tesseract misreads of DL field labels."""
+    """Map common Tesseract misreads of document field labels."""
     text = _clean(text).lower()
     replacements = (
         ("valisty", "validity"),
@@ -78,9 +137,9 @@ def _normalize_field_text(text):
     for src, dst in replacements:
         text = text.replace(src, dst)
 
-    text = re.sub(r"\b(nwre|nave|nane|namc|nme)\b", "name", text)
-    text = re.sub(r"\b(famer|facher|feiner|fatner)\b", "father", text)
-    text = re.sub(r"\b(ben|birh|bith|berth|girth)\b", "birth", text)
+    text = re.sub(r"\b(nwre|nave|nane|namc|nme|naam)\b", "name", text)
+    text = re.sub(r"\b(famer|facher|feiner|fatner|fathar|fater|fathr|pita)\b", "father", text)
+    text = re.sub(r"\b(ben|birh|bith|berth|girth|janm|janam)\b", "birth", text)
     return text
 
 
@@ -124,6 +183,26 @@ def _looks_like_name_pair(words):
         if letters[i] and letters[i + 1]:
             return True
     return False
+
+
+def _count_name_pairs(words):
+    letters = []
+    for word in words:
+        cleaned = re.sub(r"[^A-Za-z]", "", str(word.get("text", "")))
+        if len(cleaned) >= 3 and cleaned.lower() not in _DL_STOPWORDS:
+            letters.append(cleaned)
+        else:
+            letters.append("")
+
+    pairs = 0
+    i = 0
+    while i < len(letters) - 1:
+        if letters[i] and letters[i + 1]:
+            pairs += 1
+            i += 2
+        else:
+            i += 1
+    return pairs
 
 
 def _find_id_number(words, expected_len, doc_type=""):
@@ -187,26 +266,17 @@ def _find_id_number(words, expected_len, doc_type=""):
     # --------------------------------------------------
     if doc_type == "pan":
 
-        match = re.search(
-            r"\b[A-Z]{5}\d{4}[A-Z]\b",
-            text,
-            re.IGNORECASE
-        )
+        found = _extract_pan_id(text)
+        if found:
+            return found
 
-        if match:
-
-            value = match.group(0).upper()
-
-            return {
-                "found": True,
-                "count": 1,
-                "best": {
-                    "digits": value,
-                    "source_word": value,
-                    "bbox": None,
-                    "confidence": None,
-                },
-            }
+        # OCR often splits tokens across words (e.g. ABCDE and 1234F)
+        for i in range(len(words)):
+            for width in (2, 3, 4, 5):
+                window = _sliding_window_text(words, i, width)
+                found = _extract_pan_id(window)
+                if found:
+                    return found
 
     # --------------------------------------------------
     # DRIVING LICENCE
@@ -335,6 +405,42 @@ def _detect_required_fields(words, required_fields, doc_type=""):
             or _looks_like_name_pair(words)
         ):
             found["name"] = True
+
+    # --------------------------------------------------
+    # PAN special handling
+    #
+    # Real PAN cards often have date formatted as DD/MM/YYYY
+    # without explicit "DOB" prefix, and names may be bilingual
+    # or have subtle OCR distortions in "Father's Name".
+    # --------------------------------------------------
+
+    if doc_type == "pan":
+
+        dates = re.findall(
+            r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{4}\b",
+            field_text
+        )
+
+        if (
+            dates
+            or "date of birth" in field_text
+            or "dob" in field_text
+            or "birth" in field_text
+        ):
+            found["dob"] = True
+
+        if (
+            re.search(r"\bname\b", field_text)
+            or _looks_like_name_pair(words)
+        ):
+            found["name"] = True
+
+        if (
+            found.get("father's name")
+            or re.search(r"\b(father|paternal|pita)\b", field_text)
+            or _count_name_pairs(words) >= 2
+        ):
+            found["father's name"] = True
 
     return {
         "fields": found,
@@ -607,11 +713,15 @@ def print_report(
                 "MANUAL REVIEW REQUIRED"
             )
 
-        else:
+        elif risk == "HIGH":
 
             final_decision = (
                 "FRAUD SUSPECTED"
             )
+
+        else:
+
+            final_decision = "VERIFIED"
 
     lines = [
 
